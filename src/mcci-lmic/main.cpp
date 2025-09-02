@@ -5,6 +5,26 @@
 #include "secrets.hpp"
 #include "utils.hpp"
 
+#define PIN_CS 5
+#define PIN_RST 14
+#define PIN_MISO 19
+#define PIN_MOSI 23
+#define PIN_SCK 18
+#define PIN_DIO0 26
+#define REG_VERSION 0x42
+#define REG_OP_MODE 0x01
+#define REG_FIFO 0x00
+#define REG_FIFO_ADDR_PTR 0x0D
+#define REG_FIFO_TX_BASE_ADDR 0x0E
+#define REG_PAYLOAD_LENGTH 0x22
+#define REG_IRQ_FLAGS 0x12
+#define REG_IRQ_FLAGS_MASK 0x11
+#define RF_OPMODE_SLEEP 0x00
+#define RF_OPMODE_STANDBY 0x01
+#define RF_OPMODE_TX 0x03
+#define RF_OPMODE_LORA_MODE 0x80
+#define IRQ_TX_DONE_MASK 0x08
+
 const lmic_pinmap lmic_pins = {
     .nss = 5,
     .rxtx = LMIC_UNUSED_PIN,
@@ -20,15 +40,37 @@ unsigned long last_tx_time = 0;
 const unsigned long TX_INTERVAL = 20000;
 static uint16_t tx_success_count = 0;
 static uint16_t tx_fail_count = 0;
-
+volatile bool dio0_rising = false;
+void IRAM_ATTR dio0_isr() { dio0_rising = true; }
 void do_send(osjob_t* j);
+static const SPISettings sx1276SPI(8000000, MSBFIRST, SPI_MODE0);
 
-void print_device_info() {
-    Serial.println("=== Device Configuration ===");
-    Serial.println();
-    Serial.println("Region: EU868");
-    Serial.println("Activation: ABP");
-    Serial.println();
+uint8_t readRegister(uint8_t address) {
+    digitalWrite(PIN_CS, LOW);
+    SPI.beginTransaction(sx1276SPI);
+    SPI.transfer(address & 0x7F);
+    uint8_t val = SPI.transfer(0x00);
+    SPI.endTransaction();
+    digitalWrite(PIN_CS, HIGH);
+    return val;
+}
+
+void writeRegister(uint8_t address, uint8_t value) {
+    digitalWrite(PIN_CS, LOW);
+    SPI.beginTransaction(sx1276SPI);
+    SPI.transfer(address | 0x80);
+    SPI.transfer(value);
+    SPI.endTransaction();
+    digitalWrite(PIN_CS, HIGH);
+}
+
+void resetChip() {
+    pinMode(PIN_RST, OUTPUT);
+    digitalWrite(PIN_RST, LOW);
+    delay(10);
+    digitalWrite(PIN_RST, HIGH);
+    delay(50);
+    pinMode(PIN_RST, INPUT);
 }
 
 void setup_eu868_channels() {
@@ -44,6 +86,14 @@ void setup_eu868_channels() {
     LMIC_setupChannel(6, 867700000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);
     LMIC_setupChannel(7, 867900000, DR_RANGE_MAP(DR_SF12, DR_SF7), BAND_CENTI);
     LMIC_setupChannel(8, 868800000, DR_RANGE_MAP(DR_FSK, DR_FSK), BAND_MILLI);
+}
+
+void print_device_info() {
+    Serial.println("=== Device Configuration ===");
+    Serial.println();
+    Serial.println("Region: EU868");
+    Serial.println("Activation: ABP");
+    Serial.println();
 }
 
 void print_channel_status() {
@@ -92,6 +142,7 @@ void do_send(osjob_t* j) {
         case DR_SF12: Serial.print("12"); break;
         default: Serial.print("?"); break;
     }
+    LMIC.txpow = 14;
     Serial.print(", Power: ");
     Serial.print(LMIC.txpow);
     Serial.print(" dBm, Channel: ");
@@ -113,41 +164,28 @@ void onEvent(ev_t ev) {
     Serial.print(current_time);
     Serial.print("ms] ");
     switch(ev) {
-        case EV_SCAN_TIMEOUT:
-            Serial.println("EV_SCAN_TIMEOUT");
-            break;
-        case EV_BEACON_FOUND:
-            Serial.println("EV_BEACON_FOUND");
-            break;
-        case EV_BEACON_MISSED:
-            Serial.println("EV_BEACON_MISSED");
-            break;
-        case EV_BEACON_TRACKED:
-            Serial.println("EV_BEACON_TRACKED");
-            break;
-        case EV_JOINING:
-            Serial.println("EV_JOINING");
-            break;
-        case EV_JOINED:
-            Serial.println("EV_JOINED");
-            break;
-        case EV_RFU1:
-            Serial.println("EV_RFU1");
-            break;
-        case EV_JOIN_FAILED:
-            Serial.println("EV_JOIN_FAILED");
-            break;
-        case EV_REJOIN_FAILED:
-            Serial.println("EV_REJOIN_FAILED");
-            break;
-        case EV_TXSTART:
-            Serial.println("EV_TXSTART - Radio transmission started");
-            break;
-        case EV_TXCOMPLETE:
+        case EV_SCAN_TIMEOUT: Serial.println("EV_SCAN_TIMEOUT"); break;
+        case EV_BEACON_FOUND: Serial.println("EV_BEACON_FOUND"); break;
+        case EV_BEACON_MISSED: Serial.println("EV_BEACON_MISSED"); break;
+        case EV_BEACON_TRACKED: Serial.println("EV_BEACON_TRACKED"); break;
+        case EV_JOINING: Serial.println("EV_JOINING"); break;
+        case EV_JOINED: Serial.println("EV_JOINED"); break;
+        case EV_RFU1: Serial.println("EV_RFU1"); break;
+        case EV_JOIN_FAILED: Serial.println("EV_JOIN_FAILED"); break;
+        case EV_REJOIN_FAILED: Serial.println("EV_REJOIN_FAILED"); break;
+        case EV_TXSTART: Serial.println("EV_TXSTART - Radio transmission started"); break;
+        case EV_TXCOMPLETE: {
             Serial.print("EV_TXCOMPLETE");
             transmission_pending = false;
-            Serial.print(" - TxDone pin: ");
-            Serial.print(digitalRead(32) ? "HIGH" : "LOW");
+            bool hwEdge = false;
+            noInterrupts();
+            hwEdge = dio0_rising;
+            dio0_rising = false;
+            interrupts();
+            Serial.print(" - DIO0 edge seen by ISR: ");
+            Serial.print(hwEdge ? "YES" : "NO");
+            Serial.print(" - DIO0 current level: ");
+            Serial.print(digitalRead(lmic_pins.dio[0]) ? "HIGH" : "LOW");
             if (LMIC.txrxFlags & TXRX_ACK) {
                 Serial.print(" - ACK received from TTN!");
                 tx_success_count++;
@@ -173,24 +211,13 @@ void onEvent(ev_t ev) {
             Serial.println("Transmission attempt to TTN complete");
             os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(TX_INTERVAL/1000), do_send);
             break;
-        case EV_LOST_TSYNC:
-            Serial.println("EV_LOST_TSYNC");
-            break;
-        case EV_RESET:
-            Serial.println("EV_RESET");
-            break;
-        case EV_RXCOMPLETE:
-            Serial.println("EV_RXCOMPLETE");
-            break;
-        case EV_LINK_DEAD:
-            Serial.println("EV_LINK_DEAD");
-            break;
-        case EV_LINK_ALIVE:
-            Serial.println("EV_LINK_ALIVE");
-            break;
-        case EV_SCAN_FOUND:
-            Serial.println("EV_SCAN_FOUND");
-            break;
+        }
+        case EV_LOST_TSYNC: Serial.println("EV_LOST_TSYNC"); break;
+        case EV_RESET: Serial.println("EV_RESET"); break;
+        case EV_RXCOMPLETE: Serial.println("EV_RXCOMPLETE"); break;
+        case EV_LINK_DEAD: Serial.println("EV_LINK_DEAD"); break;
+        case EV_LINK_ALIVE: Serial.println("EV_LINK_ALIVE"); break;
+        case EV_SCAN_FOUND: Serial.println("EV_SCAN_FOUND"); break;
         case EV_TXCANCELED:
             Serial.println("EV_TXCANCELED");
             transmission_pending = false;
@@ -254,10 +281,36 @@ void setup() {
     Serial.println("Testing connection to TTN");
     Serial.println();
     print_device_info();
-    SPI.begin();
-    pinMode(26, INPUT);
-    pinMode(33, INPUT);
-    pinMode(32, INPUT);
+    pinMode(PIN_CS, OUTPUT);
+    digitalWrite(PIN_CS, HIGH);
+    pinMode(lmic_pins.dio[0], INPUT);
+    pinMode(lmic_pins.dio[1], INPUT);
+    pinMode(lmic_pins.dio[2], INPUT);
+    resetChip();
+    SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS);
+    delay(100);
+    uint8_t version = 0;
+    for (int i = 0; i < 5; ++i) {
+        version = readRegister(REG_VERSION);
+        Serial.print("SX127x Version register: 0x");
+        Serial.println(version, HEX);
+        if (version == 0x12) break;
+        resetChip();
+        delay(100);
+    }
+    if (version == 0x12) {
+        Serial.println("Chip detected OK.");
+    } else {
+        Serial.println("Unexpected response from radio; continuing but check wiring and reset line.");
+    }
+    writeRegister(REG_OP_MODE, RF_OPMODE_LORA_MODE | RF_OPMODE_STANDBY);
+    delay(10);
+    Serial.print("Current Op Mode: 0x");
+    Serial.println(readRegister(REG_OP_MODE), HEX);
+    writeRegister(REG_IRQ_FLAGS_MASK, ~IRQ_TX_DONE_MASK);
+    writeRegister(REG_IRQ_FLAGS, 0xFF);
+    attachInterrupt(digitalPinToInterrupt(lmic_pins.dio[0]), dio0_isr, RISING);
+    delay(20);
     os_init();
     LMIC_reset();
     LMIC_setSession(0x13, DEVADDR, NWKSKEY, APPSKEY);
@@ -266,6 +319,7 @@ void setup() {
     LMIC_setLinkCheckMode(0);
     LMIC.dn2Dr = DR_SF9;
     LMIC_setDrTxpow(DR_SF7, 14);
+    LMIC.txpow = 14;
     LMIC_setClockError(MAX_CLOCK_ERROR * 10 / 100);
     LMIC.adrTxPow = 14;
     LMIC_setAdrMode(0);
@@ -275,7 +329,7 @@ void setup() {
     Serial.print(TX_INTERVAL / 1000);
     Serial.println(" seconds");
     Serial.println();
-    do_send(&sendjob);
+    os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(2), do_send);
 }
 
 void loop() {
@@ -295,3 +349,4 @@ void loop() {
         print_transmission_stats();
     }
 }
+
