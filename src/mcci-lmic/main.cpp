@@ -3,6 +3,7 @@
 #include <hal/hal.h>
 #include <SPI.h>
 #include "secrets.hpp"
+#include "utils.hpp"
 
 const lmic_pinmap lmic_pins = {
     .nss = 5,
@@ -16,17 +17,11 @@ static uint8_t ping_payload[] = "TTN_PING";
 static uint16_t ping_counter = 0;
 bool transmission_pending = false;
 unsigned long last_tx_time = 0;
-const unsigned long TX_INTERVAL = 60000;
+const unsigned long TX_INTERVAL = 20000;
+static uint16_t tx_success_count = 0;
+static uint16_t tx_fail_count = 0;
 
 void do_send(osjob_t* j);
-
-void print_hex(const uint8_t* data, uint8_t len) {
-    for (uint8_t i = 0; i < len; i++) {
-        if (data[i] < 16) Serial.print("0");
-        Serial.print(data[i], HEX);
-        if (i < len - 1) Serial.print(" ");
-    }
-}
 
 void print_device_info() {
     Serial.println("=== Device Configuration ===");
@@ -101,6 +96,12 @@ void do_send(osjob_t* j) {
     Serial.print(LMIC.txpow);
     Serial.print(" dBm, Channel: ");
     Serial.println(LMIC.txChnl);
+    if (LMIC.opmode & OP_TXRXPEND) {
+        Serial.println("Error: Radio is busy, skipping transmission");
+        tx_fail_count++;
+        os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(5), do_send);
+        return;
+    }
     LMIC_setTxData2(1, ping_payload, strlen((char*)ping_payload), 0);
     transmission_pending = true;
     last_tx_time = millis();
@@ -145,10 +146,14 @@ void onEvent(ev_t ev) {
         case EV_TXCOMPLETE:
             Serial.print("EV_TXCOMPLETE");
             transmission_pending = false;
+            Serial.print(" - TxDone pin: ");
+            Serial.print(digitalRead(32) ? "HIGH" : "LOW");
             if (LMIC.txrxFlags & TXRX_ACK) {
                 Serial.print(" - ACK received from TTN!");
+                tx_success_count++;
             } else {
                 Serial.print(" - No ACK (normal for unconfirmed uplinks)");
+                tx_success_count++;
             }
             if (LMIC.dataLen) {
                 Serial.print(" - Received ");
@@ -165,7 +170,7 @@ void onEvent(ev_t ev) {
             Serial.print(" dBm, SNR: ");
             Serial.print(LMIC.snr);
             Serial.println(" dB");
-            Serial.println("✓ MESSAGE SUCCESSFULLY TRANSMITTED TO TTN");
+            Serial.println("Transmission attempt to TTN complete");
             os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(TX_INTERVAL/1000), do_send);
             break;
         case EV_LOST_TSYNC:
@@ -189,7 +194,8 @@ void onEvent(ev_t ev) {
         case EV_TXCANCELED:
             Serial.println("EV_TXCANCELED");
             transmission_pending = false;
-            Serial.println("✗ TRANSMISSION CANCELED");
+            tx_fail_count++;
+            Serial.println("Transmission canceled");
             os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(10), do_send);
             break;
         default:
@@ -226,15 +232,32 @@ void print_lmic_status() {
     Serial.println();
 }
 
+void print_transmission_stats() {
+    Serial.println("=== Transmission Statistics ===");
+    Serial.print("Successful transmissions: ");
+    Serial.println(tx_success_count);
+    Serial.print("Failed transmissions: ");
+    Serial.println(tx_fail_count);
+    if (tx_success_count + tx_fail_count > 0) {
+        Serial.print("Success rate: ");
+        Serial.print((100.0 * tx_success_count) / (tx_success_count + tx_fail_count));
+        Serial.println("%");
+    }
+    Serial.println();
+}
+
 void setup() {
     Serial.begin(115200);
     while (!Serial) yield();
     delay(1000);
     Serial.println("=== TTN Ping Test ===");
-    Serial.println("Testing connection to The Things Network");
+    Serial.println("Testing connection to TTN");
     Serial.println();
     print_device_info();
     SPI.begin();
+    pinMode(26, INPUT);
+    pinMode(33, INPUT);
+    pinMode(32, INPUT);
     os_init();
     LMIC_reset();
     LMIC_setSession(0x13, DEVADDR, NWKSKEY, APPSKEY);
@@ -269,5 +292,6 @@ void loop() {
             Serial.print((TX_INTERVAL - (millis() - last_tx_time)) / 1000);
             Serial.println(" seconds");
         }
+        print_transmission_stats();
     }
 }
