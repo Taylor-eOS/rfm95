@@ -31,13 +31,12 @@ const lmic_pinmap lmic_pins = {
     .rst = 14,
     .dio = {26, 33, 32},
 };
-
 osjob_t sendjob;
 static uint8_t ping_payload[] = "TTN_PING";
 static uint16_t ping_counter = 0;
 bool transmission_pending = false;
 unsigned long last_tx_time = 0;
-const unsigned long TX_INTERVAL = 20000;
+const unsigned long TX_INTERVAL = 10000;
 static uint16_t tx_success_count = 0;
 static uint16_t tx_fail_count = 0;
 volatile bool dio0_rising = false;
@@ -190,7 +189,7 @@ void onEvent(ev_t ev) {
                 Serial.print(" - ACK received from TTN!");
                 tx_success_count++;
             } else {
-                Serial.print(" - No ACK (normal for unconfirmed uplinks)");
+                Serial.print(" - No ACK");
                 tx_success_count++;
             }
             if (LMIC.dataLen) {
