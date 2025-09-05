@@ -10,7 +10,6 @@
 #define PIN_MOSI 23
 #define PIN_SCK 18
 #define PIN_DIO0 26
-
 #define REG_VERSION 0x42
 #define REG_OP_MODE 0x01
 #define REG_IRQ_FLAGS 0x12
@@ -18,6 +17,13 @@
 #define RF_OPMODE_STANDBY 0x01
 #define RF_OPMODE_LORA_MODE 0x80
 #define IRQ_TX_DONE_MASK 0x08
+#define BAND_CENTI 0
+#define DR_SF7    5
+#define DR_SF8    4
+#define DR_SF9    3
+#define DR_SF10   2
+#define DR_SF11   1
+#define DR_SF12   0
 
 const lmic_pinmap lmic_pins = {
     .nss = PIN_CS,
@@ -27,11 +33,9 @@ const lmic_pinmap lmic_pins = {
 };
 
 static const SPISettings sx1276SPI(8000000, MSBFIRST, SPI_MODE0);
-
 osjob_t sendjob;
 volatile bool dio0_rising = false;
 void IRAM_ATTR dio0_isr() { dio0_rising = true; }
-
 static uint8_t ping_payload[32] = "TTN_PING";
 static uint16_t ping_counter = 0;
 static bool transmission_pending = false;
@@ -90,8 +94,8 @@ void radio_preinit() {
         int n = snprintf(b, sizeof(b), "OPMODE: 0x%02X\n", op);
         if (n > 0) Serial.write((const uint8_t*)b, n);
     }
-    writeRegister(REG_IRQ_FLAGS, 0xFF); // clear
-    writeRegister(REG_IRQ_FLAGS_MASK, (uint8_t)(~IRQ_TX_DONE_MASK)); // unmask TXDONE
+    writeRegister(REG_IRQ_FLAGS, 0xFF); //clear
+    writeRegister(REG_IRQ_FLAGS_MASK, (uint8_t)(~IRQ_TX_DONE_MASK)); //unmask TXDONE
     pinMode(PIN_DIO0, INPUT);
     attachInterrupt(digitalPinToInterrupt(PIN_DIO0), dio0_isr, RISING);
     delay(20);
@@ -160,7 +164,7 @@ void onEvent(ev_t ev) {
                 LMIC.rssi,
                 LMIC.snr);
             if (n > 0) Serial.write((const uint8_t*)buf, n);
-            // do not reschedule; one-shot send
+            //no reschedule; one-shot send
             break;
         }
         default: {
@@ -185,13 +189,12 @@ void setup() {
     char s[80];
     int n = snprintf(s, sizeof(s), "LMIC configured ABP DEVADDR=0x%08lX SF12 P14\n", (unsigned long)DEVADDR);
     if (n > 0) Serial.write((const uint8_t*)s, n);
-    // schedule single send a bit later to let LMIC settle
     os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(2), do_send);
 }
 
 void loop() {
     os_runloop_once();
-    // watchdog: if pending too long, reset and stop (does not reschedule)
+    //watchdog: if pending too long, reset and stop
     if (transmission_pending && (millis() - last_tx_time > (TX_INTERVAL * 3))) {
         char t[80];
         int n = snprintf(t, sizeof(t), "TX timeout, giving up for this boot\n");
