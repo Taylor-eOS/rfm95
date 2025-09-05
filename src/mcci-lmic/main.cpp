@@ -24,6 +24,7 @@
 #define DR_SF10   2
 #define DR_SF11   1
 #define DR_SF12   0
+#define LED_PIN 2
 
 const lmic_pinmap lmic_pins = {
     .nss = PIN_CS,
@@ -41,6 +42,10 @@ static uint16_t ping_counter = 0;
 static bool transmission_pending = false;
 static unsigned long last_tx_time = 0;
 const unsigned long TX_INTERVAL = 20000UL;
+const unsigned long LED_BUSY = 100UL;
+const unsigned long LED_IDLE = 200UL;
+static unsigned long led_last_toggle = 0;
+static bool led_state = LOW;
 
 uint8_t readRegister(uint8_t address) {
     digitalWrite(PIN_CS, LOW);
@@ -176,10 +181,31 @@ void onEvent(ev_t ev) {
     }
 }
 
+void led_init() {
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
+    led_last_toggle = millis();
+    led_state = LOW;
+}
+
+void led_task() {
+    unsigned long now = millis();
+    bool busy = transmission_pending || (LMIC.opmode & OP_TXRXPEND);
+    unsigned long on = busy ? LED_BUSY : LED_IDLE;
+    unsigned long off = busy ? LED_BUSY : LED_IDLE * 10;
+    unsigned long dur = led_state ? on : off;
+    if (now - led_last_toggle >= dur) {
+        led_state = !led_state;
+        digitalWrite(LED_PIN, led_state ? HIGH : LOW);
+        led_last_toggle = now;
+    }
+}
+
 void setup() {
     Serial.begin(115200);
     while (!Serial) yield();
     delay(200);
+    led_init();
     Serial.write((const uint8_t*)"Boot: radio preinit\n", 20);
     radio_preinit();
     os_init();
@@ -193,8 +219,8 @@ void setup() {
 }
 
 void loop() {
+    led_task();
     os_runloop_once();
-    //watchdog: if pending too long, reset and stop
     if (transmission_pending && (millis() - last_tx_time > (TX_INTERVAL * 3))) {
         char t[80];
         int n = snprintf(t, sizeof(t), "TX timeout, giving up for this boot\n");
